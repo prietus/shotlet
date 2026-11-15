@@ -208,7 +208,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango, PangoCairo  # noqa: E402
 from gi.repository import Gtk4LayerShell as Layer  # noqa: E402
 
 CSS = """
@@ -291,6 +291,7 @@ window.shotlet { background: none; }
 .shotlet-thumb.shown { opacity: 1; transform: none; }
 .shotlet-thumb.leaving { opacity: 0; transform: translateX(260px); transition: opacity 240ms ease-in, transform 260ms ease-in; }
 .shotlet-thumb:hover { border-color: #cba6f7; }
+.shotlet-thumb.dragging { opacity: 0.35; }
 """
 
 ACCENT = (0.796, 0.651, 0.969)      # #cba6f7
@@ -923,13 +924,15 @@ class Countdown:
 
 class Thumbnail:
     """The result, floating in the corner for a few seconds. Click: annotate
-    it in swappy (a recording: play it). Right click: dismiss."""
+    it in swappy (a recording: play it). Drag: drop the file on another
+    program (a terminal gets its path). Right click: dismiss."""
 
     WIDTH = 200
 
     def __init__(self, app, monitor, path, video):
         self.app, self.path, self.video = app, path, video
         self.timeout = None
+        self.dragging = False
         image = path
         if video:
             image = os.path.join(CACHE_DIR, "thumb.png")
@@ -967,7 +970,7 @@ class Thumbnail:
         card.set_overflow(Gtk.Overflow.HIDDEN)
         card.add_css_class("shotlet-thumb")
         card.set_cursor(Gdk.Cursor.new_from_name("pointer"))
-        card.set_tooltip_text(("Click to play · " if video else "Click to annotate · ") + self.pretty())
+        card.set_tooltip_text(("Click to play · " if video else "Click to annotate · ") + "drag to another window · " + self.pretty())
         if video:
             badge = Gtk.DrawingArea(content_width=34, content_height=34, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
             badge.set_draw_func(self.draw_play)
@@ -977,6 +980,14 @@ class Thumbnail:
         click = Gtk.GestureClick(button=0)
         click.connect("released", self.on_click)
         card.add_controller(click)
+        # Drag it to another program: as a file (file managers, browsers,
+        # chats...) and as text, its path (terminals, editors).
+        source = Gtk.DragSource(actions=Gdk.DragAction.COPY)
+        source.connect("prepare", self.on_drag_prepare)
+        source.connect("drag-begin", self.on_drag_begin, picture)
+        source.connect("drag-end", self.on_drag_end)
+        source.connect("drag-cancel", self.on_drag_cancel)
+        card.add_controller(source)
         hover = Gtk.EventControllerMotion()
         hover.connect("enter", lambda *_: self.pause())
         hover.connect("leave", lambda *_: self.arm(2500))
@@ -1013,6 +1024,8 @@ class Thumbnail:
 
     def arm(self, ms):
         self.pause()
+        if self.dragging:          # stay while it is being dragged
+            return
         self.timeout = GLib.timeout_add(ms, self.leave)
 
     def leave(self):
@@ -1029,7 +1042,37 @@ class Thumbnail:
             self.app.done()
         return False
 
+    def on_drag_prepare(self, source, x, y):
+        self.grab = (x, y)
+        files = GObject.Value(Gdk.FileList, Gdk.FileList.new_from_list([Gio.File.new_for_path(self.path)]))
+        return Gdk.ContentProvider.new_union([
+            Gdk.ContentProvider.new_for_value(files),
+            Gdk.ContentProvider.new_for_value(GObject.Value(str, self.path)),
+        ])
+
+    def on_drag_begin(self, source, drag, picture):
+        self.dragging, self.dropped = True, True
+        self.pause()
+        source.set_icon(Gtk.WidgetPaintable.new(picture), int(self.grab[0]), int(self.grab[1]))
+        self.card.add_css_class("dragging")
+
+    def on_drag_cancel(self, source, drag, reason):
+        self.dropped = False       # drag-end follows
+        return False
+
+    def on_drag_end(self, source, drag, delete):
+        """Dropped on a program: the thumbnail has done its job. Dropped on
+        nothing: it comes back for a few seconds."""
+        self.dragging = False
+        if self.dropped:
+            self.leave()
+        else:
+            self.card.remove_css_class("dragging")
+            self.arm(2500)
+
     def on_click(self, gesture, n, x, y):
+        if self.dragging:
+            return
         if gesture.get_current_button() == 1:
             if self.video:
                 cmd = ["xdg-open", self.path]

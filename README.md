@@ -9,7 +9,8 @@ on the one of macOS (⌘⇧5): a floating bar with
   5 or 10 second **timer**, mouse pointer, audio, remember the last
   selection, floating thumbnail,
 - a **thumbnail** of the result in the corner: click it to annotate the
-  screenshot in swappy (or play the recording), right click to dismiss.
+  screenshot in swappy (or play the recording), drag it to another program
+  to drop the file there (a terminal gets its path), right click to dismiss.
 
 It is one Python file (GTK 4 on a layer-shell surface); the work is done by
 `grim` and `wf-recorder`.
