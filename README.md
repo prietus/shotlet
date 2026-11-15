@@ -8,6 +8,8 @@ on the one of macOS (⌘⇧5): a floating bar with
 - **Options**: where to save (Screenshots folder, Desktop, clipboard), a
   5 or 10 second **timer**, mouse pointer, audio, remember the last
   selection, floating thumbnail,
+- **upload** every screenshot to a pastebin, an image host or your own
+  server, and get its address in the clipboard,
 - a **thumbnail** of the result in the corner: click it to annotate the
   screenshot in swappy (or play the recording), drag it to another program
   to drop the file there (a terminal gets its path), right click to dismiss.
@@ -35,6 +37,36 @@ Screenshots go to `~/Pictures/Screenshots` (and the clipboard), recordings
 to `~/Videos/Recordings`. Settings live in `~/.config/shotlet/config.json`;
 `~/.config/shotlet/style.css` (GTK CSS, classes `shotlet-bar`,
 `shotlet-menu`, `shotlet-pill`, `shotlet-thumb`) restyles it.
+
+## Uploading
+
+`~/.config/shotlet/uploaders.conf` (written with examples the first time
+the toolbar opens) lists the places a screenshot can be uploaded to. Each
+appears under **Upload Screenshots to** in Options: tick one and every
+screenshot is uploaded after it is taken (click it again to stop). The
+address is copied to the clipboard and shown in a notification; a failure
+is notified too. Recordings are never uploaded.
+
+```ini
+[litterbox (72 h)]
+command = curl -fsS -F reqtype=fileupload -F time=72h -F fileToUpload=@{file} https://litterbox.catbox.moe/resources/internals/api.php
+
+[my server]
+command = scp -q {file} me@example.org:/srv/http/shots/
+url = https://example.org/shots/{name}
+```
+
+`command` is run by the shell with `{file}` replaced by the quoted path of
+the image; the first `http(s)://` address it prints is the result. If the
+answer is JSON, `json` names the key that holds the address; if nothing is
+printed, `url` gives it (`{name}` is the file name). A pastebin of your own
+with a token:
+
+```ini
+[my pastebin]
+command = curl -fsS -H "Authorization: Bearer $(cat ~/.config/pastetoken)" -F file=@{file} https://paste.example.org/api/upload
+json = url
+```
 
 ## Install
 

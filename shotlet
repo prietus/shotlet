@@ -13,15 +13,21 @@ python-gobject; swappy (click on the thumbnail to annotate) and ffmpeg
 
 Settings are changed from the Options menu and kept in
 ~/.config/shotlet/config.json; ~/.config/shotlet/style.css restyles it.
+~/.config/shotlet/uploaders.conf lists where screenshots can be uploaded
+(a pastebin, an image host, your own server); tick one under Options.
 """
+import configparser
 import json
 import math
 import os
+import re
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import warnings
 
@@ -31,6 +37,7 @@ RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
 REC_STATE = os.path.join(RUNTIME, "screenrec")
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "shotlet")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+UPLOADERS_FILE = os.path.join(CONFIG_DIR, "uploaders.conf")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "shotlet")
 
 DEFAULTS = {
@@ -42,6 +49,7 @@ DEFAULTS = {
     "audio": False,
     "remember": True,         # start from the last selected region
     "thumbnail": True,
+    "upload": "",             # a section of uploaders.conf, or "" not to upload
     "last_region": None,      # {"output": name, "rect": [x, y, w, h]} (local to the output)
 }
 
@@ -72,8 +80,92 @@ def save_config(cfg):
         pass
 
 
-def notify(title, body="", icon=None):
+UPLOADERS_TEMPLATE = """\
+# Where shotlet can upload a screenshot. Tick one under Options and every
+# screenshot is uploaded after it is taken; its address is copied to the
+# clipboard and shown in a notification.
+#
+# One section per place. `command` is run by the shell with {file} replaced
+# by the (quoted) path of the image; the first http(s):// address it prints
+# is the result. If it answers with JSON, `json` names the key that holds
+# the address. If it prints none, give the address in `url`, where {name}
+# is the file name. A command that fails (non-zero exit) is reported.
+#
+# These are public services: anybody with the address can see the image.
+
+# Temporary: the file is deleted after `time` (1h, 12h, 24h or 72h).
+[litterbox (72 h)]
+command = curl -fsS -F reqtype=fileupload -F time=72h -F fileToUpload=@{file} https://litterbox.catbox.moe/resources/internals/api.php
+
+# Your own server, over ssh:
+#[my server]
+#command = scp -q {file} me@example.org:/srv/http/shots/
+#url = https://example.org/shots/{name}
+
+# A pastebin of your own that takes a token (kept in a file of its own,
+# chmod 600) and answers {"url": "..."}:
+#[my pastebin]
+#command = curl -fsS -H "Authorization: Bearer $(cat ~/.config/pastetoken)" -F file=@{file} https://paste.example.org/api/upload
+#json = url
+
+#[imgur]
+#command = curl -fsS -H "Authorization: Client-ID YOUR_CLIENT_ID" -F image=@{file} https://api.imgur.com/3/image | grep -o 'https:[^"]*' | tr -d '\\\\'
+"""
+
+
+def load_uploaders():
+    """{name: {"command": ..., "url": ...}} from uploaders.conf, in file
+    order. The file is written with examples the first time."""
+    if not os.path.exists(UPLOADERS_FILE):
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(UPLOADERS_FILE, "w") as f:
+                f.write(UPLOADERS_TEMPLATE)
+        except OSError:
+            pass
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(UPLOADERS_FILE)
+    except configparser.Error as e:
+        notify("uploaders.conf has an error", str(e).splitlines()[0])
+        return {}
+    return {name: {"command": sec.get("command", "").strip(), "url": sec.get("url", "").strip(),
+                   "json": sec.get("json", "").strip()}
+            for name, sec in parser.items() if name != "DEFAULT" and sec.get("command", "").strip()}
+
+
+def upload(name, uploader, path):
+    """Run an uploader on a file (blocking); returns (address, error)."""
+    cmd = uploader["command"].replace("{file}", shlex.quote(path))
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, "%s did not answer in two minutes" % name
+    except OSError as e:
+        return None, str(e)
+    if r.returncode != 0:
+        lines = (r.stderr.strip() or r.stdout.strip()).splitlines()
+        return None, lines[-1] if lines else "the command failed (exit %d)" % r.returncode
+    if uploader["json"]:
+        try:
+            value = json.loads(r.stdout)[uploader["json"]]
+        except (ValueError, KeyError, TypeError):
+            said = r.stdout.strip().splitlines()
+            return None, "no \"%s\" in the answer: %s" % (uploader["json"], said[0][:120] if said else "(empty)")
+        return str(value), None
+    found = re.search(r"https?://[^\s\"'<>]+", r.stdout)
+    if found:
+        return found.group(0), None
+    if uploader["url"]:
+        return uploader["url"].replace("{name}", os.path.basename(path)), None
+    said = r.stdout.strip().splitlines()
+    return None, ("no address in the answer: " + said[0][:120]) if said else "the answer was empty (no address)"
+
+
+def notify(title, body="", icon=None, urgent=False):
     cmd = ["notify-send", "-a", "shotlet", title, body]
+    if urgent:                       # stays until dismissed
+        cmd[1:1] = ["-u", "critical"]
     if icon:
         cmd[3:3] = ["-i", icon]
     try:
@@ -564,6 +656,11 @@ class Overlay(Gtk.ApplicationWindow):
         item("Show Mouse Pointer", cfg["pointer"], toggle("pointer"))
         item("Copy Screenshots to Clipboard", cfg["clipboard"], toggle("clipboard"))
         item("Record Audio", cfg["audio"], toggle("audio"))
+        if self.app.uploaders:
+            rule()
+            heading("Upload Screenshots to")
+            for name in self.app.uploaders:      # a click on the ticked one: don't upload
+                item(name, cfg["upload"] == name, choose("upload", "" if cfg["upload"] == name else name))
         self.popover.set_child(box)
 
     # -- animation ------------------------------------------------------------
@@ -1102,6 +1199,7 @@ class Shotlet(Gtk.Application):
         self.mode = self.cfg["mode"]
         self.overlays = []
         self.windows = []
+        self.uploaders = {}
         self.busy = False          # between the click and the end of the capture
         self.thumb = None
         self.started = False
@@ -1154,6 +1252,7 @@ class Shotlet(Gtk.Application):
         focused = None
         for line in state:
             focused = (line.get("State") or {}).get("focused_output") or focused
+        self.uploaders = load_uploaders()      # read every time: edits apply at once
         reply = rivermonad_ipc("Windows")
         self.windows = reply[0].get("Windows", []) if reply and isinstance(reply[0], dict) else []
         main = next((m for m in mons if m.get_connector() == focused), mons[0])
@@ -1281,7 +1380,27 @@ class Shotlet(Gtk.Application):
                     subprocess.Popen(["wl-copy", "--type", "image/png"], stdin=f)
             except OSError:
                 pass
+        if self.cfg["upload"] in self.uploaders:
+            self.upload(self.cfg["upload"], path)
         self.finished(path, False, monitor)
+
+    def upload(self, name, path):
+        """In the background: the thumbnail and the toolbar don't wait for it."""
+        uploader = self.uploaders[name]
+        self.hold()
+
+        def work():
+            url, err = upload(name, uploader, path)
+            if url:
+                try:
+                    subprocess.run(["wl-copy", url], timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                notify("Uploaded to " + name, url + "\nThe address is in the clipboard", path)
+            else:
+                notify("Upload to %s failed" % name, err + "\nThe clipboard still has the image, not an address", urgent=True)
+            GLib.idle_add(lambda: self.release() and False)
+        threading.Thread(target=work, daemon=True).start()
 
     def record(self, cmd, path):
         try:
