@@ -1,7 +1,7 @@
 # Maintainer: Carlos Prieto Ortiz <prietus@live.com>
 
 pkgname=shotlet
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Screenshot and screen recording toolbar for Wayland, modelled on the one of macOS'
 url='https://github.com/prietus/shotlet'
@@ -12,7 +12,7 @@ optdepends=('swappy: annotate a screenshot from its thumbnail'
             'ffmpeg: thumbnails of recordings'
             'rivermonad: window mode (the windows on screen come from its IPC)')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('948dbb787d1e4d60721640c2c3ae80089f5ba897c7f6ceb5c164f5603c69040e')
+sha256sums=('aa6b6a9f82f04b42f1d6323f3b3151d03399effd5d47153471721054045a792b')
 
 package() {
   cd $pkgname-$pkgver
